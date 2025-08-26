@@ -17,10 +17,10 @@ pip install -e .
 
 # or with uv
 uv tool install .
-
+```
 ### Examples
 
-```
+```bash
 # last 100 commits (skip merges)
 rendergit-log https://github.com/karpathy/nanoGPT --max-commits 100
 
@@ -34,7 +34,7 @@ rendergit-log https://github.com/owner/repo --max-commits 300 --clone-depth 350
 rendergit-log https://github.com/owner/repo -U 6
 ```
 
-```
+```bash
 usage: rendergit-log [-h] [--out OUT] [--max-commits N] [--include-merges]
                      [--clone-depth N] [-U CONTEXT] [--max-diff-bytes BYTES]
                      [--no-open]
