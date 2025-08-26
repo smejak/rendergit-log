@@ -1,18 +1,23 @@
-# /usr/bin/env python3
 """
 Render a repository's commit history to a single static HTML page with
 a clickable sidebar of commits. Clicking a commit shows the diff against its
 previous commit (first parent).
 
-Now with dual view modes:
+Dual view modes:
 - 👤 Human View: visual, syntax-highlighted diffs
 - 🤖 LLM View: single CXML text block containing commits + raw patches
+
+Single-commit focus:
+- Click a commit in the sidebar to focus on *only that commit* in both views
+- Use the "← Back to full view" button to restore the complete history
 """
 
 from __future__ import annotations
 import argparse
 import dataclasses
 import html
+import json
+import base64
 import pathlib
 import shutil
 import subprocess
@@ -204,11 +209,33 @@ def render_commit(repo_dir: str, commit: Commit, context: int, max_diff_bytes: i
 
 # ---- LLM CXML ---------------------------------------------------------------
 
+def commit_to_cxml(repo_url: str, r: CommitRender) -> str:
+    """Return a one-document CXML block for a single commit."""
+    c = r.commit
+    parent = c.first_parent if c.first_parent else EMPTY_TREE_SHA
+    lines: List[str] = []
+    lines.append("<documents>")
+    lines.append(f'<document index="1">')
+    lines.append(f"<source>{c.sha} — {c.subject or '(no subject)'}</source>")
+    lines.append("<document_content>")
+    lines.append(f"Repository: {repo_url}")
+    lines.append(f"Commit: {c.sha}")
+    lines.append(f"Parent: {parent}")
+    lines.append(f"Author: {c.author_name} <{c.author_email}>")
+    lines.append(f"Date: {c.author_date_iso}")
+    lines.append(f"Stats: files={r.files_changed} insertions=+{r.insertions} deletions=-{r.deletions}")
+    lines.append("")
+    lines.append("--- PATCH START ---")
+    lines.append(r.patch_text.rstrip())
+    lines.append("--- PATCH END ---")
+    lines.append("</document_content>")
+    lines.append("</document>")
+    lines.append("</documents>")
+    return "\n".join(lines)
+
+
 def generate_cxml_text(repo_url: str, renders: List[CommitRender]) -> str:
-    """
-    Produce a single CXML text block summarizing commits and embedding raw patches.
-    Mirrors rendergit's <documents> format, one <document> per commit.
-    """
+    """Return multi-document CXML for the whole history window."""
     lines: List[str] = []
     lines.append("<documents>")
     for idx, r in enumerate(renders, 1):
@@ -239,7 +266,10 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
     formatter = HtmlFormatter(nowrap=False)
     pygments_css = formatter.get_style_defs(".highlight")
 
-    cxml_text = generate_cxml_text(repo_url, renders)
+    # Full CXML + per-commit CXML (Base64-encoded to avoid HTML parsing edge-cases)
+    full_cxml = generate_cxml_text(repo_url, renders)
+    per_commit_cxml_b64 = {r.commit.sha: base64.b64encode(commit_to_cxml(repo_url, r).encode("utf-8")).decode("ascii") for r in renders}
+    full_cxml_b64 = base64.b64encode(full_cxml.encode("utf-8")).decode("ascii")
 
     # Sidebar items
     def sidebar_item(r: CommitRender) -> str:
@@ -307,13 +337,11 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
             f"{'<span class=\"pill warn\">truncated</span>' if r.patch_truncated else ''}"
             f"</div>"
         )
-
         body = (
             f"<div class='changed'>{file_list(r)}</div>"
             f"<div class='diff highlight'>{r.patch_html}</div>"
             f"<div class='back-top'><a href='#top'>↑ Back to top</a></div>"
         )
-
         sections.append(
             f"""
 <section class="commit" id="commit-{c.sha}">
@@ -367,10 +395,11 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
 
   /* View toggle */
   .view-toggle {{
-    margin: 0.5rem 0 1rem 0;
+    margin: 0.25rem 0 0.75rem 0;
     display: flex;
     gap: 0.5rem;
     align-items: center;
+    flex-wrap: wrap;
   }}
   .toggle-btn {{
     padding: 0.5rem 1rem;
@@ -387,6 +416,12 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
   }}
   .toggle-btn:hover:not(.active) {{
     background: #f6f8fa;
+  }}
+
+  /* Back button for single-commit mode */
+  #back-all {{
+    display: none;
+    margin: 0 0 1rem 0;
   }}
 
   /* Human view commit sections */
@@ -464,6 +499,7 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
       <strong>View:</strong>
       <button class="toggle-btn active" onclick="showHumanView(this)">👤 Human</button>
       <button class="toggle-btn" onclick="showLLMView(this)">🤖 LLM</button>
+      <button id="back-all" class="toggle-btn" onclick="showAllCommits()">← Back to full view</button>
     </div>
 
     <div id="human-view">
@@ -474,7 +510,7 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
       <section>
         <h2>🤖 LLM View — CXML Format</h2>
         <p>Copy the text below and paste it to an LLM for analysis:</p>
-        <textarea id="llm-text" readonly>{html.escape(cxml_text)}</textarea>
+        <textarea id="llm-text" readonly>{html.escape(full_cxml)}</textarea>
         <div class="copy-hint">
           💡 <strong>Tip:</strong> Click in the text area and press Ctrl+A (Cmd+A on Mac) to select all, then Ctrl+C (Cmd+C) to copy.
         </div>
@@ -483,13 +519,81 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
   </main>
 </div>
 
+<!-- Serialized CXML (Base64) for safe embedding -->
+<script type="application/json" id="cxml-full">{json.dumps(full_cxml_b64)}</script>
+<script type="application/json" id="cxml-map">{json.dumps(per_commit_cxml_b64)}</script>
+
 <script>
+// --- helpers: base64 -> utf-8 string ---------------------------------------
+function b64ToUtf8(b64) {{
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  if (window.TextDecoder) {{
+    return new TextDecoder().decode(bytes);
+  }} else {{
+    // Fallback (older browsers)
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    try {{ return decodeURIComponent(escape(s)); }} catch (e) {{ return s; }}
+  }}
+}}
+
+const CXML_FULL_B64 = JSON.parse(document.getElementById('cxml-full').textContent || '""');
+const CXML_MAP_B64 = JSON.parse(document.getElementById('cxml-map').textContent || '{{}}');
+
+let singleModeSha = null;
+
+function updateLLMTextForSelection() {{
+  const ta = document.getElementById('llm-text');
+  if (singleModeSha && CXML_MAP_B64[singleModeSha]) {{
+    ta.value = b64ToUtf8(CXML_MAP_B64[singleModeSha]);
+  }} else {{
+    ta.value = b64ToUtf8(CXML_FULL_B64);
+  }}
+}}
+
 function selectCommit(sha) {{
-  // highlight in sidebar
+  singleModeSha = sha;
+
+  // Highlight in sidebar
   document.querySelectorAll('#commit-list li').forEach(li => {{
     li.classList.toggle('selected', li.getAttribute('data-sha') === sha);
   }});
-  // anchor navigation scrolls to the commit section
+
+  // Show only the selected commit section in human view
+  document.querySelectorAll('section.commit').forEach(sec => {{
+    sec.style.display = (sec.id === 'commit-' + sha) ? 'block' : 'none';
+  }});
+
+  // Show "Back to full view"
+  const back = document.getElementById('back-all');
+  back.style.display = 'inline-block';
+
+  // Update LLM textarea to single-commit CXML
+  updateLLMTextForSelection();
+}}
+
+function showAllCommits() {{
+  singleModeSha = null;
+
+  // Unselect in sidebar
+  document.querySelectorAll('#commit-list li').forEach(li => li.classList.remove('selected'));
+
+  // Show all commit sections
+  document.querySelectorAll('section.commit').forEach(sec => {{
+    sec.style.display = 'block';
+  }});
+
+  // Hide back button
+  const back = document.getElementById('back-all');
+  back.style.display = 'none';
+
+  // Restore full CXML
+  updateLLMTextForSelection();
+
+  // Optional: jump back to top
+  if (location.hash) location.hash = '#top';
 }}
 
 function filterCommits() {{
@@ -509,12 +613,15 @@ function showHumanView(btn) {{
 }}
 
 function showLLMView(btn) {{
+  // Ensure LLM text reflects current selection
+  updateLLMTextForSelection();
+
   document.getElementById('human-view').style.display = 'none';
   document.getElementById('llm-view').style.display = 'block';
   document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
 
-  // Auto-select all text for easy copying
+  // Auto-select for easy copying
   setTimeout(() => {{
     const textArea = document.getElementById('llm-text');
     textArea.focus();
@@ -522,11 +629,8 @@ function showLLMView(btn) {{
   }}, 100);
 }}
 
-// Auto-select first commit when page loads (nice default)
-window.addEventListener('DOMContentLoaded', () => {{
-  const first = document.querySelector('#commit-list li a');
-  if (first) first.click();
-}});
+// Note: We no longer auto-select the first commit on load, so the default view shows all commits.
+// The user can click a commit to enter single-commit focus mode.
 </script>
 </body>
 </html>

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rendergit-log"
-version = "0.3.0"
+version = "0.4.0"
 description = "Render a GitHub repo's commit history to a single static HTML page."
 readme = "README.md"
 license = "0BSD"
