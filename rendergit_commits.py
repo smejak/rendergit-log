@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-# file: rendergit_commits.py
+# /usr/bin/env python3
 """
 Render a repository's commit history to a single static HTML page with
 a clickable sidebar of commits. Clicking a commit shows the diff against its
 previous commit (first parent).
 
-This is a companion to rendergit's "flatten files" view, but focused on history.
+Now with dual view modes:
+- 👤 Human View: visual, syntax-highlighted diffs
+- 🤖 LLM View: single CXML text block containing commits + raw patches
 """
 
 from __future__ import annotations
@@ -201,11 +202,44 @@ def render_commit(repo_dir: str, commit: Commit, context: int, max_diff_bytes: i
     )
 
 
+# ---- LLM CXML ---------------------------------------------------------------
+
+def generate_cxml_text(repo_url: str, renders: List[CommitRender]) -> str:
+    """
+    Produce a single CXML text block summarizing commits and embedding raw patches.
+    Mirrors rendergit's <documents> format, one <document> per commit.
+    """
+    lines: List[str] = []
+    lines.append("<documents>")
+    for idx, r in enumerate(renders, 1):
+        c = r.commit
+        parent = c.first_parent if c.first_parent else EMPTY_TREE_SHA
+        lines.append(f'<document index="{idx}">')
+        lines.append(f"<source>{c.sha} — {c.subject or '(no subject)'}</source>")
+        lines.append("<document_content>")
+        lines.append(f"Repository: {repo_url}")
+        lines.append(f"Commit: {c.sha}")
+        lines.append(f"Parent: {parent}")
+        lines.append(f"Author: {c.author_name} <{c.author_email}>")
+        lines.append(f"Date: {c.author_date_iso}")
+        lines.append(f"Stats: files={r.files_changed} insertions=+{r.insertions} deletions=-{r.deletions}")
+        lines.append("")
+        lines.append("--- PATCH START ---")
+        lines.append(r.patch_text.rstrip())
+        lines.append("--- PATCH END ---")
+        lines.append("</document_content>")
+        lines.append("</document>")
+    lines.append("</documents>")
+    return "\n".join(lines)
+
+
 # ---- HTML --------------------------------------------------------------------
 
 def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[CommitRender]) -> str:
     formatter = HtmlFormatter(nowrap=False)
     pygments_css = formatter.get_style_defs(".highlight")
+
+    cxml_text = generate_cxml_text(repo_url, renders)
 
     # Sidebar items
     def sidebar_item(r: CommitRender) -> str:
@@ -216,7 +250,7 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
         cl = "merge" if c.is_merge else ""
         return (
             f'<li class="{cl}" data-sha="{c.sha}" data-author="{html.escape(c.author_name.lower())}" '
-            f'data-subject="{html.escape(c.subject.lower())}" data-date="{html.escape(c.author_date_iso.lower())}">'
+            f'data-subject="{html.escape((c.subject or "").lower())}" data-date="{html.escape(c.author_date_iso.lower())}">'
             f'<a href="#commit-{c.sha}" onclick="selectCommit(\'{c.sha}\')">'
             f'<code class="sha">{short}</code> <span class="subject">{subject}</span>'
             f'<div class="meta">{meta} &middot; {html.escape(c.author_name)}</div>'
@@ -328,9 +362,34 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
 
   main.container {{ padding: 1rem; }}
 
-  .repo-meta {{ margin-bottom: .75rem; }}
+  .repo-meta {{ margin-bottom: .5rem; }}
   .repo-meta small {{ color: var(--muted); }}
 
+  /* View toggle */
+  .view-toggle {{
+    margin: 0.5rem 0 1rem 0;
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }}
+  .toggle-btn {{
+    padding: 0.5rem 1rem;
+    border: 1px solid #d1d9e0;
+    background: white;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 0.9rem;
+  }}
+  .toggle-btn.active {{
+    background: #0366d6;
+    color: white;
+    border-color: #0366d6;
+  }}
+  .toggle-btn:hover:not(.active) {{
+    background: #f6f8fa;
+  }}
+
+  /* Human view commit sections */
   .commit {{ padding: 1rem 0; border-top: 1px solid var(--line); }}
   .commit h2 {{ margin: 0 0 .4rem 0; font-size: 1.1rem; }}
   .commit .meta {{ color: var(--muted); font-size: .9rem; margin-bottom: .3rem; }}
@@ -352,6 +411,24 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
   pre {{ background:#f6f8fa; padding:.75rem; overflow:auto; border-radius:6px; }}
   .highlight {{ overflow-x: auto; }}
   .back-top {{ margin-top: .4rem; font-size: .9rem; }}
+
+  /* LLM view */
+  #llm-view {{ display: none; }}
+  #llm-text {{
+    width: 100%;
+    height: 70vh;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.85em;
+    border: 1px solid #d1d9e0;
+    border-radius: 6px;
+    padding: 1rem;
+    resize: vertical;
+  }}
+  .copy-hint {{
+    margin-top: 0.5rem;
+    color: #666;
+    font-size: 0.9em;
+  }}
 
   @media (max-width: 900px) {{
     .page {{ grid-template-columns: 1fr; }}
@@ -383,7 +460,26 @@ def build_html(repo_url: str, repo_dir: str, head_commit: str, renders: List[Com
       <small><strong>HEAD commit:</strong> {html.escape(head_commit)}</small>
     </section>
 
-    {"".join(sections)}
+    <div class="view-toggle">
+      <strong>View:</strong>
+      <button class="toggle-btn active" onclick="showHumanView(this)">👤 Human</button>
+      <button class="toggle-btn" onclick="showLLMView(this)">🤖 LLM</button>
+    </div>
+
+    <div id="human-view">
+      {"".join(sections)}
+    </div>
+
+    <div id="llm-view">
+      <section>
+        <h2>🤖 LLM View — CXML Format</h2>
+        <p>Copy the text below and paste it to an LLM for analysis:</p>
+        <textarea id="llm-text" readonly>{html.escape(cxml_text)}</textarea>
+        <div class="copy-hint">
+          💡 <strong>Tip:</strong> Click in the text area and press Ctrl+A (Cmd+A on Mac) to select all, then Ctrl+C (Cmd+C) to copy.
+        </div>
+      </section>
+    </div>
   </main>
 </div>
 
@@ -403,6 +499,27 @@ function filterCommits() {{
     const hay = (li.getAttribute('data-subject') + ' ' + li.getAttribute('data-author') + ' ' + li.getAttribute('data-sha')).toLowerCase();
     li.style.display = hay.indexOf(q) >= 0 ? '' : 'none';
   }});
+}}
+
+function showHumanView(btn) {{
+  document.getElementById('human-view').style.display = 'block';
+  document.getElementById('llm-view').style.display = 'none';
+  document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}}
+
+function showLLMView(btn) {{
+  document.getElementById('human-view').style.display = 'none';
+  document.getElementById('llm-view').style.display = 'block';
+  document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  // Auto-select all text for easy copying
+  setTimeout(() => {{
+    const textArea = document.getElementById('llm-text');
+    textArea.focus();
+    textArea.select();
+  }}, 100);
 }}
 
 // Auto-select first commit when page loads (nice default)
