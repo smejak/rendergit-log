@@ -17,3 +17,26 @@ pip install -e .
 
 # or with uv
 uv tool install .
+
+### Examples
+
+```
+# last 100 commits (skip merges)
+rendergit-log https://github.com/karpathy/nanoGPT --max-commits 100
+
+# include merge commits (diff vs first parent)
+rendergit-log https://github.com/owner/repo --include-merges
+
+# shallow clone roughly matching your window (faster on huge repos)
+rendergit-log https://github.com/owner/repo --max-commits 300 --clone-depth 350
+
+# increase context lines in unified diff
+rendergit-log https://github.com/owner/repo -U 6
+```
+
+```
+usage: rendergit-log [-h] [--out OUT] [--max-commits N] [--include-merges]
+                     [--clone-depth N] [-U CONTEXT] [--max-diff-bytes BYTES]
+                     [--no-open]
+                     repo_url
+```
